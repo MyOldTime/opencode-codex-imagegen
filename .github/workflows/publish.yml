@@ -1,0 +1,59 @@
+name: Publish GitHub Package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://npm.pkg.github.com
+          scope: '@myoldtime'
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          node --input-type=module -e "
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          assert.equal(process.env.RELEASE_TAG, 'v' + p.version, 'release tag must equal v<version>');
+          assert.equal(p.name, '@myoldtime/opencode-codex-imagegen');
+          assert.equal(p.publishConfig.access, 'public');
+          "
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test
+      - run: npm pack --dry-run
+      # This job only publishes to GitHub Packages. The npmjs.com release is a
+      # separate local `npm run publish:npm` run; a local npm login is not
+      # available to GitHub Actions.
+      - name: Publish to GitHub Packages
+        run: npm publish --ignore-scripts --registry=https://npm.pkg.github.com --@myoldtime:registry=https://npm.pkg.github.com --access=public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify published version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          npm view "@myoldtime/opencode-codex-imagegen@$VERSION" version \
+            --registry=https://npm.pkg.github.com \
+            --@myoldtime:registry=https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

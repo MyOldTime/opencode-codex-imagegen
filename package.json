@@ -1,0 +1,50 @@
+{
+  "name": "@myoldtime/opencode-codex-imagegen",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenCode V2 plugin: proxy_imagegen generates images through the Responses hosted image_generation tool, using an explicit proxy or the OpenAI account managed by OpenCode (Sign in with ChatGPT and the legacy Codex methods).",
+  "license": "MIT",
+  "author": "MyOldTime",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MyOldTime/opencode-codex-imagegen.git"
+  },
+  "homepage": "https://github.com/MyOldTime/opencode-codex-imagegen#readme",
+  "bugs": {
+    "url": "https://github.com/MyOldTime/opencode-codex-imagegen/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "image-generation",
+    "responses-api",
+    "chatgpt",
+    "codex"
+  ],
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./core": "./core.mjs"
+  },
+  "files": [
+    "index.js",
+    "core.mjs",
+    "README.md",
+    "VALIDATION.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check core.mjs && node --check test.mjs && node --check release.test.mjs",
+    "test": "node --test test.mjs release.test.mjs",
+    "prepublishOnly": "npm run check && npm test",
+    "publish:npm": "npm publish --registry=https://registry.npmjs.org --@myoldtime:registry=https://registry.npmjs.org --access=public",
+    "publish:github": "npm publish --registry=https://npm.pkg.github.com --@myoldtime:registry=https://npm.pkg.github.com --access=public"
+  },
+  "engines": {
+    "node": ">=20.16"
+  }
+}
