@@ -1,8 +1,16 @@
 # 验证记录
 
+## Google Gemini 适配（2026-11-26）
+
+- 使用注入的 `fetch` 测试 Google Interactions REST 请求及 `model_output` 响应，覆盖文生图、多参考图编辑、权限、格式校验、不覆盖文件、失败不重试和取消/超时不写盘。原 OpenAI/Codex 测试一并回归。
+- `npm run check`、`npm test`（45 项通过，其中新增 Google 测试 9 项）及 `npm pack --dry-run --json` 均通过。Google 自定义代理以模拟响应检查 URL 拼接、请求头、禁止重定向以及失败不回退。
+- 后续经用户配置的代理实测一次：最小 `model` + `input` 请求返回 HTTP 200、`Content-Type: application/json`、`status: completed`，内嵌 JPEG。使用同一次响应的图片数据离线重放验证转码，得到 1376×768 的 PNG。未用真实请求验证可选尺寸参数或图生图。修复后 46 项离线测试通过。
+
+## 0.1.0 历史验证
+
 测试日期：2026-10-30。宿主 OpenCode 2.2.0，Node.js 24.18.0，Windows。
 
-## 自动化测试
+### 自动化测试
 
 - `npm ci --ignore-scripts`：通过（无新增依赖，0 vulnerabilities）。
 - `npm run check`：通过。
@@ -11,14 +19,14 @@
 - 包内容使用 `package.json` 的 `files` 白名单，不包含凭据、原始响应、测试图片、测试脚本、`.github` 或机器配置。
 - 路由测试覆盖显式 API key、宿主托管 API key 和三种 OAuth 方法；另覆盖权限、凭据刷新委托、严格配置校验、错误脱敏、流式解析、取消与超时、引用图片以及文件不覆盖。
 
-## 本轮重命名与双源发布准备（离线）
+### 重命名与双源发布准备（离线）
 
 - 本轮只做元数据与文档重命名，未重新联网生成图片：`core.mjs` 逻辑未改动。改名前后的 SHA256 均为 `D04176C047A350BD2198A56EFE024385B1DDB6E862571293010D0EDEF7EFC896`；`index.js` 仅插件 ID 从 `myoldtime.codex-proxy-imagegen` 改为 `opencode-codex-imagegen`，工具名 `proxy_imagegen` 不变。
 - 包名在 npmjs 与 GitHub Packages 统一为 `@myoldtime/opencode-codex-imagegen`，`package.json` 与 `package-lock.json` 同名同版本（0.1.0，MIT）。
 - `publish:npm` / `publish:github` 各自显式给出 `--registry` 与 `--@myoldtime:registry`（同一目标 URL），`publishConfig` 只保留 `access: public`，项目不含 `.npmrc`；`release.test.mjs` 断言脚本、workflow 的 registry/scope override、tag 与版本、`access`、`NODE_AUTH_TOKEN` 仅来自 `secrets.GITHUB_TOKEN`、files 白名单不含凭据与测试。
 - GitHub Actions 只在 Release `published` 时发布 GitHub Packages；npmjs 由本机已登录账号在用户未来单独确认后执行 `npm run publish:npm`。本机 npm 登录不会传入 Actions，因此没有配置 `NPM_TOKEN`，也未做 OIDC 自动授权。
 
-## 真实请求（历史记录，本轮未重复执行）
+### 真实请求（历史记录，本轮未重复执行）
 
 下表是代码与账号能力的历史验证，不属于本轮离线重命名验证；本轮未再次联网生成，也未验证真实发布。
 
@@ -33,7 +41,7 @@
 
 legacy 验证发现真实响应可能省略 Content-Type，已修复为有界前缀格式检测，并新增单字节分片回归；另外通过保留的真实响应离线重放恢复图片，未为重放重复发起请求。
 
-## 发布与安装
+### 发布与安装
 
 **当前状态：尚未创建远端仓库、未 push、未打 tag、未发布 Release、未运行任何发布命令，也未切换正在使用的插件。** 本节命令只有用户未来单独确认后才会使用。
 

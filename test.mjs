@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtemp, readFile, rm, access } from "node:fs/promises"
+import { mkdtemp, readFile, writeFile, rm, access } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import {
@@ -474,3 +474,221 @@ test("requestHeaders keeps credentials out of metadata-relevant fields", () => {
   const headers = requestHeaders({ route: "proxy", method: "options", access: "k", url: OPENAI_RESPONSES_URL }, "ses")
   assert.deepEqual(headers, { Authorization: "Bearer k", "Content-Type": "application/json", Accept: "text/event-stream" })
 })
+
+// Interactions API wire response; output_image is a Google SDK helper, not a REST field.
+const googleImage = { type: "image", mime_type: "image/png", data: png }
+const jpeg = "/9j/7gAC/9k=" // JPEG signature fixture (no raster data needed for this test).
+const googleJpeg = { type: "image", mime_type: "image/jpeg", data: jpeg }
+const googleOptions = { provider: "google", key: "fake-gemini-key" }
+const googleResponse = (parts = [googleImage]) => Response.json({ status: "completed", steps: [{ type: "model_output", content: parts }] })
+
+test("Google configuration is opt-in and requires a dedicated key and supported options", () => {
+  assert.equal(pluginConfig({}).provider, "openai")
+  assert.equal(pluginConfig({ provider: "openai", key: "k" }).baseURL, "https://api.openai.com/v1")
+  assert.equal(pluginConfig(googleOptions).model, "gemini-nano-banana-2.1")
+  for (const key of [undefined, null, "  ", "{env:GEMINI_API_KEY}"]) {
+    assert.throws(() => pluginConfig({ ...googleOptions, key }), /Google provider requires a valid options\.key/)
+  }
+  for (const options of [{ reasoning_effort: "low" }, { fast_mode: false }]) {
+    assert.throws(() => pluginConfig({ ...googleOptions, ...options }), /only supported by the OpenAI provider/)
+  }
+  assert.throws(() => pluginConfig({ provider: "typo" }), /options\.provider/)
+  const input = { prompt: "x", out: "out.png" }
+  for (const options of [{ size: "1024x1024" }, { quality: "high" }, { aspect_ratio: "7:2" }, { image_size: "2k" }, { images: Array(15).fill("ref.png") }, { out: "out.gif" }]) {
+    assert.throws(() => validateInput({ ...input, ...options }, "google"))
+  }
+  assert.throws(() => validateInput({ ...input, aspect_ratio: "16:9" }), /only supported by the Google provider/)
+})
+
+test("Google proxy URLs preserve prefixes and reject unsafe or unresolved addresses", async () => {
+  for (const [baseURL, expected] of [
+    ["https://proxy.example/", "https://proxy.example/v1beta/interactions"],
+    ["http://127.0.0.1:8080/gemini", "http://127.0.0.1:8080/gemini/v1beta/interactions"],
+    ["https://proxy.example/gemini/v1beta/", "https://proxy.example/gemini/v1beta/interactions"],
+    ["https://proxy.example/gemini/v1", "https://proxy.example/gemini/v1/interactions"],
+    [" https://proxy.example/gemini/v1beta/interactions/ ", "https://proxy.example/gemini/v1beta/interactions"],
+  ]) {
+    const route = await resolveRoute(pluginConfig({ ...googleOptions, base_url: baseURL }))
+    assert.equal(route.url, expected)
+  }
+  for (const base_url of ["", "  ", null, 42, "{env:GEMINI_BASE_URL}", "https://", "ftp://proxy.example/", "https://user:secret@proxy.example", "https://proxy.example?v=secret", "https://proxy.example/#"]) {
+    assert.throws(() => pluginConfig({ ...googleOptions, base_url }), {
+      message: "Google options.base_url must be an HTTP(S) URL without credentials, query or fragment",
+    })
+  }
+  assert.throws(() => pluginConfig({ provider: "google", base_url: "https://proxy.example" }), /Google provider requires a valid options\.key/)
+})
+
+test("Google custom proxy receives the same Gemini request with no fallback to Google", () => temporary(async directory => {
+  const calls = []
+  const config = pluginConfig({ ...googleOptions, base_url: "https://proxy.example/gemini/v1beta" })
+  const env = {
+    ctx: { get integration() { assert.fail("must not consult OpenCode credentials") } },
+    fetcher: async (url, options) => {
+      calls.push({ url, options })
+      return calls.length === 1 ? googleResponse() : new Response("PRIVATE_PROXY_BODY", { status: 502 })
+    },
+  }
+  const result = await generateImage({ prompt: "x", out: "proxy.png" }, config, directory, env)
+  assert.equal(await readFile(result.out, "base64"), png)
+  await assert.rejects(generateImage({ prompt: "x", out: "failed.png" }, config, directory, env), { message: "Image request failed: HTTP 502" })
+  assert.equal(calls.length, 2)
+  for (const { url, options } of calls) {
+    assert.equal(url, "https://proxy.example/gemini/v1beta/interactions")
+    assert.equal(options.headers["x-goog-api-key"], googleOptions.key)
+    assert.equal(options.headers["Api-Revision"], "2026-05-20")
+    assert.equal(options.headers.Authorization, undefined)
+    assert.equal(options.redirect, "error")
+    assert.equal(JSON.parse(options.body).model, "gemini-nano-banana-2.1")
+  }
+  assert.equal(await exists(path.join(directory, "failed.png")), false)
+}))
+
+test("Google text-to-image uses the official Interactions REST contract", () => temporary(async directory => {
+  const calls = []
+  const ctx = { get integration() { assert.fail("must not consult OpenCode credentials") } }
+  const result = await generateImage({ prompt: "水彩狐狸", out: "fox.png" }, pluginConfig(googleOptions), directory, {
+    ctx, sessionID: "not-sent-to-google", fetcher: async (url, options) => {
+      calls.push({ url, ...options, body: JSON.parse(options.body) })
+      return googleResponse([{ type: "text", text: "ignored" }, googleJpeg, googleImage])
+    },
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url, "https://generativelanguage.googleapis.com/v1beta/interactions")
+  assert.equal(calls[0].method, "POST")
+  assert.equal(calls[0].redirect, "error")
+  assert.deepEqual(calls[0].headers, {
+    "x-goog-api-key": "fake-gemini-key",
+    "Api-Revision": "2026-05-20",
+    "Content-Type": "application/json",
+  })
+  assert.deepEqual(calls[0].body, {
+    model: "gemini-nano-banana-2.1",
+    input: [{ type: "text", text: "水彩狐狸" }],
+  })
+  assert.deepEqual(result, { out: path.join(directory, "fox.png"), versioned: false, bytes: Buffer.from(png, "base64").length, route: "google", method: "api-key", model: "gemini-nano-banana-2.1" })
+  assert.equal(await readFile(result.out, "base64"), png)
+}))
+
+test("Google edits multiple images in order, requests JPEG and preserves an existing file", () => temporary(async directory => {
+  const placeholder = path.join(directory, "snow.jpeg")
+  await savePNG("fox.png", directory, png)
+  await writeFile(path.join(directory, "scene.jpg"), jpeg, "base64")
+  await writeFile(placeholder, "existing")
+  let body
+  const result = await generateImage({ prompt: "改成雪景", images: ["fox.png", "scene.jpg"], out: "snow.jpeg", aspect_ratio: "16:9", image_size: "2K" }, pluginConfig({ ...googleOptions, model: "gemini-3.1-flash-image" }), directory, {
+    fetcher: async (_, request) => {
+      body = JSON.parse(request.body)
+      return googleResponse([googleJpeg])
+    },
+  })
+  assert.equal(body.model, "gemini-3.1-flash-image")
+  assert.deepEqual(body.input, [{ type: "text", text: "改成雪景" }, googleImage, googleJpeg])
+  assert.deepEqual(body.response_format, { type: "image", mime_type: "image/jpeg", aspect_ratio: "16:9", image_size: "2K" })
+  assert.equal(result.out, path.join(directory, "snow-v2.jpeg"))
+  assert.equal(result.versioned, true)
+  assert.equal(await readFile(placeholder, "utf8"), "existing")
+  assert.equal(await readFile(result.out, "base64"), jpeg)
+}))
+
+test("Google rejects unsupported and oversized reference images before fetching", () => temporary(async directory => {
+  const oversized = Buffer.alloc(15_000_001)
+  Buffer.from(png, "base64").copy(oversized)
+  await writeFile(path.join(directory, "huge.png"), oversized)
+  await writeFile(path.join(directory, "ref.gif"), "GIF89a")
+  let calls = 0
+  const env = { fetcher: async () => { calls++; return googleResponse() } }
+  const config = pluginConfig(googleOptions)
+  await assert.rejects(generateImage({ prompt: "x", out: "out.png", images: ["ref.gif"] }, config, directory, env), /Unsupported Google reference image/)
+  await assert.rejects(generateImage({ prompt: "x", out: "out.png", images: ["huge.png"] }, config, directory, env), /at most 20 MB/)
+  assert.equal(calls, 0)
+  assert.equal(await exists(path.join(directory, "out.png")), false)
+}))
+
+test("Google HTTP and response errors do not leak payloads, retry, or write a file", () => temporary(async directory => {
+  const marker = "PRIVATE_GOOGLE_PAYLOAD"
+  const cases = [
+    [new Response(marker, { status: 429 }), "Image request failed: HTTP 429"],
+    [new Response(marker), "Image response contained invalid JSON"],
+    [Response.json({ status: "failed", error: { message: marker }, steps: [{ type: "model_output", content: [googleImage] }] }), "Google image interaction did not complete"],
+    [Response.json({ status: "completed", steps: [{ type: "thought", content: [googleImage] }, { type: "model_output", content: [{ type: "text", text: marker }] }] }), "Google response contained no generated image"],
+    [googleResponse([googleJpeg]), "Could not convert Google JPEG to PNG"],
+    [googleResponse([{ ...googleImage, data: jpeg }]), "Google image MIME type does not match its bytes"],
+    [googleResponse([{ ...googleImage, data: marker }]), "Invalid image base64"],
+  ]
+  const config = pluginConfig(googleOptions)
+  for (const [response, expected] of cases) {
+    let calls = 0
+    await assert.rejects(generateImage({ prompt: "x", out: "out.png" }, config, directory, {
+      fetcher: async () => { calls++; return response },
+    }), error => error.message === expected && !error.message.includes(marker))
+    assert.equal(calls, 1)
+    assert.equal(await exists(path.join(directory, "out.png")), false)
+  }
+}))
+
+test("Google default JPEG from JSON becomes a real PNG with the decoded pixels", () => temporary(async directory => {
+  const { default: codec } = await import("jpeg-js")
+  const { PNG } = await import("pngjs")
+  const jpg = codec.encode({ width: 2, height: 1, data: Buffer.from([240, 120, 20, 255, 210, 100, 15, 255]) }).data
+  const result = await generateImage({ prompt: "fox", out: "fox.png" }, pluginConfig(googleOptions), directory, {
+    fetcher: async () => googleResponse([{ ...googleJpeg, data: jpg.toString("base64") }]),
+  })
+  const decoded = PNG.sync.read(await readFile(result.out))
+  assert.equal(decoded.width, 2)
+  assert.equal(decoded.height, 1)
+  assert.deepEqual(decoded.data, codec.decode(jpg).data)
+}))
+
+test("Google discards a late JSON response after cancellation or timeout", () => temporary(async directory => {
+  for (const cancel of [true, false]) {
+    const controller = new AbortController()
+    const out = cancel ? "cancel.png" : "timeout.png"
+    const config = pluginConfig({ ...googleOptions, timeout_ms: cancel ? 5_000 : 15 })
+    const fetcher = async (url, { signal }) => {
+      if (cancel) controller.abort()
+      else await new Promise(resolve => setTimeout(resolve, 40))
+      assert.equal(signal.aborted, true)
+      return googleResponse()
+    }
+    await assert.rejects(generateImage({ prompt: "x", out }, config, directory, { fetcher, signal: controller.signal }),
+      cancel ? { name: "AbortError" } : /timed out/)
+    assert.equal(await exists(path.join(directory, out)), false)
+  }
+}))
+
+test("Google tool advertises native options and checks read/edit permissions before fetching", () => temporary(async directory => {
+  const order = []
+  let definition
+  let denied = true
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => { order.push("fetch"); return googleResponse([googleJpeg]) }
+  try {
+    await savePNG("reference.png", directory, png)
+    await plugin.setup({
+      options: googleOptions,
+      session: { get: async () => ({ location: { directory } }) },
+      permission: { assert: async ({ action, resources }) => {
+        order.push([action, resources])
+        if (denied && action === "edit") throw new Error("edit denied")
+      } },
+      tool: { transform: async callback => callback({ add: value => { definition = value } }) },
+    })
+    assert.equal(definition.name, "proxy_imagegen")
+    assert.match(definition.description, /Google Gemini/)
+    assert.deepEqual(Object.keys(definition.input.properties).sort(), ["aspect_ratio", "image_size", "images", "out", "prompt"])
+    const args = [{ prompt: "x", out: "out.jpg", images: ["reference.png"] }, { sessionID: "ses_9" }]
+    const permissions = [["read", [path.join(directory, "reference.png")]], ["edit", [path.join(directory, "out.jpg"), path.join(directory, "out-v*.jpg")]]]
+    await assert.rejects(definition.execute(...args), /edit denied/)
+    assert.deepEqual(order, permissions)
+    order.length = 0
+    denied = false
+    const result = await definition.execute(...args)
+    assert.deepEqual(order, [...permissions, "fetch"])
+    assert.match(result.content, /Saved JPEG/)
+    assert.equal(result.metadata.route, "google")
+    assert.ok(!JSON.stringify(result).includes(googleOptions.key))
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}))

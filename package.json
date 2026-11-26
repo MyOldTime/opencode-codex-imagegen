@@ -1,8 +1,8 @@
 {
   "name": "@myoldtime/opencode-codex-imagegen",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "OpenCode V2 plugin: proxy_imagegen generates images through the Responses hosted image_generation tool, using an explicit proxy or the OpenAI account managed by OpenCode (Sign in with ChatGPT and the legacy Codex methods).",
+  "description": "OpenCode V2 plugin: generate and edit images with OpenAI Responses (API, proxy or Codex) or Google Gemini Interactions (Nano Banana).",
   "license": "MIT",
   "author": "MyOldTime",
   "repository": {
@@ -46,5 +46,9 @@
   },
   "engines": {
     "node": ">=20.16"
+  },
+  "dependencies": {
+    "jpeg-js": "0.4.4",
+    "pngjs": "7.0.0"
   }
 }

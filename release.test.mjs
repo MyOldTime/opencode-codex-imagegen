@@ -33,7 +33,7 @@ function step(name) {
 
 test("manifest publishes the scoped package name and lock stays in sync", () => {
   assert.equal(pkg.name, PACKAGE_NAME)
-  assert.equal(pkg.version, "0.1.0")
+  assert.equal(pkg.version, "0.2.0")
   assert.equal(pkg.license, "MIT")
   assert.equal(lock.name, PACKAGE_NAME)
   assert.equal(lock.packages[""].name, PACKAGE_NAME)
@@ -68,8 +68,8 @@ test("README presents the current id and tool name without legacy names", () => 
   const install = readme.slice(readme.indexOf("## 安装"), readme.indexOf("## 配置"))
   const codeBlocks = (install.match(/```(?:sh|powershell)\n([\s\S]*?)```/g) ?? [])
     .map(block => block.replace(/^```[a-z]*\n|```$/g, ""))
-  const pinnedNpm = `opencode plugin add "${PACKAGE_NAME}@0.1.0"`
-  const pinnedTag = 'opencode plugin add "github:MyOldTime/opencode-codex-imagegen#v0.1.0"'
+  const pinnedNpm = `opencode plugin add "${PACKAGE_NAME}@0.2.0"`
+  const pinnedTag = 'opencode plugin add "github:MyOldTime/opencode-codex-imagegen#v0.2.0"'
   assert.ok(codeBlocks.some(block => block.includes(pinnedNpm)), "npm install must pin the published version")
   assert.ok(codeBlocks.some(block => block.includes(pinnedTag)), "tag install must use the repository tag")
   assert.ok(
@@ -83,7 +83,7 @@ test("README presents the current id and tool name without legacy names", () => 
   assert.ok(install.includes("git clone https://github.com/MyOldTime/opencode-codex-imagegen.git"), "local install must clone the documented repository")
   assert.ok(install.includes("npm ci --ignore-scripts"), "local install must install without running scripts")
   assert.ok(/绝对路径/.test(install) && /不能指向单个文件/.test(install), "local install must require an absolute directory path")
-  assert.ok(install.includes(`${PACKAGE_NAME}@0.1.0`), "README config example must pin the released version")
+  assert.ok(install.includes(`${PACKAGE_NAME}@0.2.0`), "README config example must pin the released version")
   assert.doesNotMatch(install, /autotitle/i, "install section must not copy another plugin's instructions")
   assert.doesNotMatch(install, /迁移|保持不变/, "install section must not keep migration or naming notes")
   // The read-only check block must not tell users to publish.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- `proxy_imagegen` 可通过 `options.provider: "google"` 调用 Google Gemini Interactions API，实现文生图和多参考图编辑，默认使用 `gemini-nano-banana-2.1`。支持 `aspect_ratio`、`image_size` 以及 PNG / JPEG 输出。
+- Google 模式支持可选的 `options.base_url`，经由自定义反向代理转发原生 Gemini Interactions 请求；不配置时直连 Google。
+- 默认仍使用 OpenAI；Google 需要单独的 Gemini API key，不借用宿主 OpenAI 凭据，也不会在失败时切换后端。
+
 ## 0.1.0
 
 - 首个发布版本，包名 `@myoldtime/opencode-codex-imagegen`，插件 id `opencode-codex-imagegen`，工具名 `proxy_imagegen`（不变）。历史本地版本的 id（`local.codex-proxy-imagegen`、`myoldtime.codex-proxy-imagegen`）仅存在于迁移说明中作为旧 id 出现。
