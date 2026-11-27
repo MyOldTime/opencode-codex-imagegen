@@ -1,6 +1,6 @@
 {
   "name": "@myoldtime/opencode-codex-imagegen",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "OpenCode V2 background image generation and editing with session-scoped Codex, OpenRouter, AIHubMix and Google Gemini failover.",
   "license": "MIT",

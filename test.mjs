@@ -47,7 +47,7 @@ async function fixture(t, overrides = {}) {
   const emitter = new EventEmitter()
   let tool
   const unload = await plugin.setup({
-    options: {
+    options: Object.hasOwn(overrides, "options") ? overrides.options : {
       ...(overrides.codex && { codex: { ...(overrides.codex.key && { base_url: `http://127.0.0.1:${server.address().port}/codex/v1` }), ...overrides.codex } }),
       openrouter: { base_url: `http://127.0.0.1:${server.address().port}/router/v1`, key: overrides.router ? "router-key" : "", ...overrides.openrouter },
       aihubmix: { base_url, key: overrides.mix === false ? "  " : "fixture-key", ...overrides.aihubmix },
@@ -140,15 +140,15 @@ test("returns before HTTP response, survives foreground abort and notifies the o
   assert.equal(await readFile(path.join(f.dir, "cover.png"), "utf8"), "original")
 })
 
-test("official environment keys are optional and never enable a custom proxy", () => {
-  const names = (options, env) => configuredProviders(options, env).map(x => x.provider)
-  assert.deepEqual(names({}, {}), [])
-  assert.deepEqual(names({}, { AIHUBMIX_API_KEY: "mix" }), ["aihubmix"])
-  const env = { OPENROUTER_API_KEY: "router", AIHUBMIX_API_KEY: "mix" }
-  assert.deepEqual(names({}, env), ["openrouter", "aihubmix"])
-  assert.deepEqual(names({ openrouter: { key: " " } }, env), ["aihubmix"])
-  assert.deepEqual(names({ aihubmix: { disabled: true }, openrouter: { disabled: false } }, env), ["openrouter"])
-  assert.deepEqual(names({ aihubmix: { base_url: "https://proxy.test/ai/v1" } }, env), ["openrouter"])
+test("only listed providers can use environment keys, in the written order and only at their official origin", async () => {
+  const env = { OPENROUTER_API_KEY: "router", AIHUBMIX_API_KEY: "mix", GEMINI_API_KEY: "gemini" }
+  const names = async options => (await configuredProviders(options, { env })).map(x => x.provider)
+  assert.deepEqual(await names({}), [])
+  assert.deepEqual(await names({ aihubmix: {}, openrouter: {} }), ["aihubmix", "openrouter"])
+  assert.deepEqual(await names({ openrouter: { key: " " } }), [])
+  assert.deepEqual(await names({ aihubmix: { disabled: true }, openrouter: { disabled: false } }), ["openrouter"])
+  assert.deepEqual(await names({ aihubmix: { base_url: "https://proxy.test/ai/v1" } }), [])
+  assert.deepEqual(await names({ google: {} }), [])
 })
 
 test("disabled OpenRouter is absent from failover even with a key", { timeout: 5000 }, async t => {
@@ -200,13 +200,89 @@ const codexImage = { type: "image_generation_call", result: b64 }
 const googlePNG = { type: "image", mime_type: "image/png", data: b64 }
 const interaction = (...content) => ({ status: "completed", steps: [{ type: "model_output", content }] })
 
-test("Google uses its own official key, model and Interactions endpoint; proxies require an explicit key", () => {
+test("omitted and empty options use only active OpenCode connections: OpenAI then Google", { timeout: 5000 }, async t => {
+  const calls = [], resolved = []
+  const integration = { connection: {
+    async active(id) { return { id } },
+    async resolve(account) {
+      resolved.push(account.id)
+      return { type: "key", key: `${account.id}-managed` }
+    },
+  } }
+  t.mock.method(globalThis, "fetch", async (url, { headers }) => {
+    calls.push(url)
+    if (url === "https://api.openai.com/v1/responses") {
+      assert.equal(headers.Authorization, "Bearer openai-managed")
+      return Response.json({}, { status: 503 })
+    }
+    assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/interactions")
+    assert.equal(headers["x-goog-api-key"], "google-managed")
+    assert.equal(headers.Authorization, undefined)
+    return Response.json(interaction(googlePNG))
+  })
+  for (const options of [undefined, {}]) {
+    const f = await fixture(t, { options, integration })
+    await f.submit({ prompt: "test" })
+    const result = await f.notifications.take()
+    assert.deepEqual(result.metadata.attempts.map(a => [a.provider, a.status]), [["codex", "failed"], ["google", "succeeded"]])
+    assert.equal(await readFile(result.metadata.saved[0], "base64"), b64)
+  }
+  assert.deepEqual(resolved, ["openai", "google", "openai", "google"])
+  assert.equal(calls.length, 4)
+})
+
+test("explicit order routes Google → OpenRouter → Codex, resolving only credentials reached", { timeout: 5000 }, async t => {
+  const options = { google: {}, openrouter: { key: "router-key" }, codex: {} }
+  const resolved = []
+  const f = await fixture(t, { options, integration: { connection: {
+    active: async id => ({ id }),
+    resolve: async ({ id }) => { resolved.push(id); return { type: "key", key: `${id}-key` } },
+  } } })
+  let fail = false
+  t.mock.method(globalThis, "fetch", async url => {
+    if (!fail) return Response.json(interaction(googlePNG))
+    if (url === "https://api.openai.com/v1/responses") return Response.json({ output: [codexImage] })
+    return Response.json({}, { status: 503 })
+  })
+  await f.submit({ prompt: "first" })
+  assert.equal((await f.notifications.take()).metadata.provider, "google")
+  assert.deepEqual(resolved, ["google"])
+  fail = true
+  await f.submit({ prompt: "again" })
+  assert.deepEqual((await f.notifications.take()).metadata.attempts.map(a => [a.provider, a.status]),
+    [["google", "failed"], ["openrouter", "failed"], ["codex", "succeeded"]])
+  assert.deepEqual(resolved, ["google", "google", "openai"])
+})
+
+test("empty explicit chain never discovers unlisted accounts or sends managed credentials to a proxy", async t => {
+  const lookups = []
+  const f = await fixture(t, {
+    options: { google: { base_url: "https://proxy.test" }, openrouter: { disabled: true } },
+    integration: { connection: { active: async id => { lookups.push(id); return { id } }, resolve: async () => ({ type: "key", key: "host-key" }) } },
+  })
+  await assert.rejects(f.submit({ prompt: "test" }), /没有可用的生图服务/)
+  assert.deepEqual(lookups, [])
+  assert.deepEqual(f.permissions, [])
+})
+
+test("Google-first routing stops on an explicit copyright refusal without trying a backup", { timeout: 5000 }, async t => {
+  const f = await fixture(t, { options: { google: { key: "g" }, codex: { key: "c" } } })
+  const fetch = t.mock.method(globalThis, "fetch", async () =>
+    Response.json({ error: { message: "Image generation blocked due to copyright/recitation." } }, { status: 400 }))
+  await f.submit({ prompt: "test" })
+  const result = await f.notifications.take()
+  assert.deepEqual(result.metadata.attempts.map(a => a.provider), ["google"])
+  assert.match(result.text, /版权/)
+  assert.equal(fetch.mock.callCount(), 1)
+})
+
+test("Google uses its own official key, model and Interactions endpoint; proxies require an explicit key", async () => {
   const env = { GEMINI_API_KEY: "google-key" }
   const google = (options) => providerConnection("google", options, env)
   assert.deepEqual(google({}), { endpoint: "https://generativelanguage.googleapis.com/v1beta/interactions", key: "google-key", model: "gemini-nano-banana-2.1" })
-  assert.deepEqual(configuredProviders({}, env).map(x => x.provider), ["google"])
+  assert.deepEqual((await configuredProviders({ google: { base_url: "https://generativelanguage.googleapis.com" } }, { env })).map(x => x.provider), ["google"])
   for (const settings of [{ disabled: true }, { key: " " }, { key: "{env:MISSING}" }, { base_url: "https://proxy.test" }])
-    assert.deepEqual(configuredProviders({ google: settings }, env), [])
+    assert.deepEqual(await configuredProviders({ google: settings }, { env }), [])
   for (const [prefix, target] of [["/gemini", "/gemini/v1beta/interactions"], ["/v1/", "/v1/interactions"], ["/v1beta/interactions/", "/v1beta/interactions"]]) {
     const config = google({ base_url: `https://proxy.test${prefix}`, key: "proxy-key", model: "another-image-model" })
     assert.deepEqual(config, { key: "proxy-key", model: "another-image-model", endpoint: `https://proxy.test${target}` })
@@ -372,7 +448,7 @@ test("Codex → OpenRouter → AIHubMix marks only the originating session on ac
 
 test("managed Codex resolves current credentials per call and confines token and session headers to their route", { timeout: 5000 }, async t => {
   let cred, resolutions = 0
-  const f = await fixture(t, { mix: false, integration: { connection: {
+  const f = await fixture(t, { options: { codex: {} }, integration: { connection: {
     async active(name) { assert.equal(name, "openai"); return { id: "test-account" } },
     async resolve(account) { assert.equal(account.id, "test-account"); resolutions++; return cred },
   } } })

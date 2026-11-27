@@ -34,7 +34,7 @@ function step(name) {
 
 test("manifest publishes the scoped package name and lock stays in sync", () => {
   assert.equal(pkg.name, PACKAGE_NAME)
-  assert.equal(pkg.version, "1.0.0")
+  assert.equal(pkg.version, "1.1.0")
   assert.equal(pkg.license, "MIT")
   assert.equal(lock.name, PACKAGE_NAME)
   assert.equal(lock.packages[""].name, PACKAGE_NAME)

@@ -62,21 +62,53 @@ export function validateOptions(options = {}) {
 }
 
 function effectiveKey(provider, options, env) {
-  if (options.key != null) return options.key
+  if (options.key !== undefined) return options.key
   const { origin, envKey } = providers[provider]
   // Only the official origin may inherit a key from the server environment.
   try { if (new URL(options.base_url ?? origin).origin === origin) return env[envKey] } catch {}
 }
 
-export function configuredProviders(options = {}, env = process.env) {
+// Discover accounts before admission, but resolve secrets only when their turn
+// arrives. Host credentials are never used with an explicit endpoint.
+async function managedCandidate(provider, settings, integration, sessionDisabled) {
+  const candidate = { provider, settings }
+  if (sessionDisabled?.has(provider)) return candidate
+  if (!integration?.active || !integration?.resolve) return
+  let account
+  try { account = await integration.active(provider === "codex" ? "openai" : "google") } catch { return }
+  if (!account) return
+  return {
+    ...candidate,
+    async resolveCredential() {
+      try { return await integration.resolve(account) }
+      catch { throw new ProviderFailure(`OpenCode 无法解析 ${provider} 连接凭据。`) }
+    },
+  }
+}
+
+export async function configuredProviders(options = {}, { integration, sessionDisabled, env = process.env } = {}) {
   const active = []
-  for (const provider of Object.keys(providers)) {
-    const { disabled = false, ...settings } = options[provider] ?? {}
+  const configured = Object.keys(options).length ? options : { codex: {}, google: {} }
+  for (const [provider, value] of Object.entries(configured)) {
+    const { disabled, ...settings } = value
     if (disabled) continue
-    const key = effectiveKey(provider, settings, env)
+    if ((provider === "codex" || provider === "google") && settings.key === undefined && settings.base_url === undefined) {
+      const candidate = await managedCandidate(provider, settings, integration, sessionDisabled)
+      if (candidate) active.push(candidate)
+      continue
+    }
+    const key = provider === "codex" ? settings.key : effectiveKey(provider, settings, env)
     if (text(key) && !key.trim().startsWith("{env:")) active.push({ provider, settings: { ...settings, key } })
   }
   return active
+}
+
+export async function imageAPIConnection({ provider, settings, resolveCredential }) {
+  if (!resolveCredential) return connection(provider, settings)
+  // The built-in Google integration resolves both saved and environment keys.
+  const cred = await resolveCredential()
+  if (cred?.type !== "key" || !text(cred.key)) throw new ProviderFailure("OpenCode 的 Google 连接未提供 Gemini API key。")
+  return connection(provider, { ...settings, key: cred.key })
 }
 
 export function connection(provider, options = {}, env = process.env) {

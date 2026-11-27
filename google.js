@@ -31,6 +31,8 @@ function interactionBody({ config, params, refs, aspect, imageSize }) {
 }
 
 function googleFailure(status, error) {
+  if (/blocked due to copyright\/recitation/i.test(error?.message ?? ""))
+    return new ProviderFailure("Google 拒绝了本次请求（版权或内容复现限制）。", { fallback: false })
   const invalidKey = Array.isArray(error?.details) && error.details.some(item => item?.reason === "API_KEY_INVALID")
   if (invalidKey || /API key not valid/i.test(error?.message ?? ""))
     return new ProviderFailure("Google API key 无效。", { disable: true })

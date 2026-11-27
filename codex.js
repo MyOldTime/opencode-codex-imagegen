@@ -6,20 +6,6 @@ const defaultChatModel = "gpt-6.2-sol"
 const legacyMethods = new Set(["chatgpt-browser", "chatgpt-headless"])
 const usableKey = key => typeof key === "string" && key.trim() && !key.trim().startsWith("{env:")
 
-// Explicit endpoints must never inherit a credential from the host. For managed
-// connections only check availability here; OpenCode resolves/refreshes at use.
-export async function codexCandidate(settings = {}, integration, sessionDisabled = false) {
-  if (settings.disabled === true) return
-  if (settings.key !== undefined || settings.base_url !== undefined) {
-    return usableKey(settings.key) ? { provider: "codex", settings } : undefined
-  }
-  if (sessionDisabled) return { provider: "codex", settings }
-  if (!integration?.active || !integration?.resolve) return
-  let account
-  try { account = await integration.active("openai") } catch { return }
-  if (account) return { provider: "codex", settings, resolveCredential: () => integration.resolve(account) }
-}
-
 export function codexUnsupported(params, mask) {
   if (mask || params.output_format !== "png" || params.background !== "auto" || !["auto", "low", "medium", "high"].includes(params.quality))
     return "Codex 通道支持无蒙版、自动背景的 PNG，质量为 auto/low/medium/high；本次参数交给下一家。"
@@ -39,8 +25,7 @@ async function codexConnection(candidate, sessionID) {
     endpoint = url.href
     access = settings.key
   } else {
-    let cred
-    try { cred = await resolveCredential() } catch { throw new ProviderFailure("OpenCode 无法解析 OpenAI 登录凭据。") }
+    const cred = await resolveCredential()
     if (cred?.type === "key") access = cred.key
     else if (cred?.type === "oauth" && (legacyMethods.has(cred.methodID) || cred.methodID === "chatgpt-token-sharing")) {
       if (typeof cred.expires === "number" && cred.expires <= Date.now()) throw new ProviderFailure("Codex 登录凭据已过期。")

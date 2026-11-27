@@ -1,4 +1,4 @@
-import { connection, googleOnlyRatios } from "./parameters.js"
+import { imageAPIConnection, googleOnlyRatios } from "./parameters.js"
 import { generate, loadInputs } from "./images.js"
 import { ProviderFailure } from "./errors.js"
 import { codexUnsupported } from "./codex.js"
@@ -16,7 +16,7 @@ function unsupportedReason(provider, job, inputs) {
 export async function route(job, disabled, active, attempts) {
   const inputs = await loadInputs(job)
   for (const candidate of active) {
-    const { provider, settings } = candidate
+    const { provider } = candidate
     job.signal.throwIfAborted()
     const entry = { provider }
     attempts.push(entry)
@@ -31,7 +31,7 @@ export async function route(job, disabled, active, attempts) {
     }
     const timeout = AbortSignal.timeout(10 * 60_000)
     try {
-      const config = provider === "codex" ? undefined : connection(provider, settings)
+      const config = provider === "codex" ? undefined : await imageAPIConnection(candidate)
       await generate({ ...job, ...inputs, signal: AbortSignal.any([job.signal, timeout]), provider, config, candidate })
       entry.status = "succeeded"
       return provider

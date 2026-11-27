@@ -4,7 +4,6 @@ import { setTimeout as delay } from "node:timers/promises"
 import { configuredProviders, validateOptions, parameters, schema } from "./parameters.js"
 import { reserveOutputs } from "./images.js"
 import { route } from "./routing.js"
-import { codexCandidate } from "./codex.js"
 
 const pluginID = "opencode-auto-imagegen"
 
@@ -55,15 +54,13 @@ export default {
       editor.add({
         name: "auto_imagegen",
         options: { codemode: false },
-        description: "Generate or edit images in the background. Try available providers in order: Codex (a chat model calling the hosted image_generation tool), OpenRouter, AIHubMix, Google Gemini. Choose parameters from the user's intent. Submit once; the originating session receives the actual provider, paths or failure. Do not poll or resubmit.",
+        description: "Generate or edit images in the background. Default: Codex then Google Gemini using OpenCode connections. When providers are configured, try only those providers in configuration order. Choose parameters from the user's intent. Submit once; the originating session receives the actual provider, paths or failure. Do not poll or resubmit.",
         input: schema,
         async execute(input, context) {
           const params = parameters(input)
           const { sessionID } = context
-          const active = configuredProviders(options)
-          const codex = await codexCandidate(options.codex, ctx.integration?.connection, sessions.get(sessionID)?.has("codex"))
-          if (codex) active.unshift(codex)
-          if (!active.length) throw new Error("没有可用的生图服务：请启用至少一家服务，并登录 Codex 或配置 Codex、OpenRouter、AIHubMix 或 Google 任意一家的 key。")
+          const active = await configuredProviders(options, { integration: ctx.integration?.connection, sessionDisabled: sessions.get(sessionID) })
+          if (!active.length) throw new Error("没有可用的生图服务：默认使用 OpenCode 的 OpenAI 或 Google 连接；若已配置 options，请确认列出的服务至少有一家已启用且有可用凭据。")
           const jobID = randomUUID()
           const { location } = await ctx.session.get({ sessionID })
           const sources = (input.images ?? []).map(file => path.resolve(location.directory, file))
