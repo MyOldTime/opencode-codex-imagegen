@@ -1,8 +1,8 @@
 {
   "name": "@myoldtime/opencode-codex-imagegen",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "type": "module",
-  "description": "OpenCode V2 plugin: generate and edit images with OpenAI Responses (API, proxy or Codex) or Google Gemini Interactions (Nano Banana).",
+  "description": "OpenCode V2 background image generation and editing with session-scoped Codex, OpenRouter, AIHubMix and Google Gemini failover.",
   "license": "MIT",
   "author": "MyOldTime",
   "repository": {
@@ -19,26 +19,31 @@
     "image-generation",
     "responses-api",
     "chatgpt",
-    "codex"
+    "codex",
+    "openrouter",
+    "aihubmix",
+    "gemini"
   ],
   "main": "./index.js",
   "exports": {
-    ".": "./index.js",
-    "./core": "./core.mjs"
+    ".": "./index.js"
   },
   "files": [
     "index.js",
-    "core.mjs",
+    "parameters.js",
+    "images.js",
+    "codex.js",
+    "google.js",
+    "routing.js",
+    "errors.js",
     "README.md",
-    "VALIDATION.md",
-    "LICENSE",
-    "CHANGELOG.md"
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "check": "node --check index.js && node --check core.mjs && node --check test.mjs && node --check release.test.mjs",
+    "check": "node --check index.js && node --check parameters.js && node --check images.js && node --check codex.js && node --check google.js && node --check routing.js && node --check errors.js && node --check test.mjs && node --check release.test.mjs",
     "test": "node --test test.mjs release.test.mjs",
     "prepublishOnly": "npm run check && npm test",
     "publish:npm": "npm publish --registry=https://registry.npmjs.org --@myoldtime:registry=https://registry.npmjs.org --access=public",

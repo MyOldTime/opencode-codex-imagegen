@@ -1,71 +1,115 @@
 import path from "node:path"
-import { generateImage, validateInput, pluginConfig, GOOGLE_ASPECT_RATIOS, GOOGLE_IMAGE_SIZES, GOOGLE_MAX_REFERENCES } from "./core.mjs"
+import { randomUUID } from "node:crypto"
+import { setTimeout as delay } from "node:timers/promises"
+import { configuredProviders, validateOptions, parameters, schema } from "./parameters.js"
+import { reserveOutputs } from "./images.js"
+import { route } from "./routing.js"
+import { codexCandidate } from "./codex.js"
+
+const pluginID = "opencode-auto-imagegen"
+
+async function notify(ctx, message) {
+  // A stable message ID makes retry safe even if the first admission succeeded
+  // but its acknowledgement was lost. Never repeat the paid generation request.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await ctx.session.synthetic(message)
+      return
+    } catch (error) {
+      if (attempt === 3) throw error
+      await delay(250 * attempt)
+    }
+  }
+}
+
+async function run(ctx, job, sessionID, jobID, disabled, active) {
+  const saved = [], attempts = []
+  let reason, upstreamID, provider
+  try {
+    provider = await route({ ...job, sessionID, saved, onTaskID: id => { upstreamID = id } }, disabled, active, attempts)
+    if (saved.length < job.params.n) reason = "上游返回的图片少于请求数量。"
+  } catch (error) {
+    reason = job.signal.aborted ? job.signal.reason?.message ?? "任务已取消。" : error.message
+  }
+  const status = saved.length === job.params.n ? "完成" : saved.length ? "部分完成" : "失败"
+  const summary = `生图${status}（${saved.length}/${job.params.n}），任务 ${jobID}`
+  const routes = attempts.map(x => `${x.provider}: ${x.status}${x.reason ? `（${x.reason}）` : ""}`).join(" → ")
+  const text = [summary, routes, reason, upstreamID && `AIHubMix 任务：${upstreamID}`, ...saved.map(file => `已保存：${file}`)].filter(Boolean).join("\n")
+  await notify(ctx, {
+    sessionID, id: `msg_${jobID}`, delivery: "queue", resume: true,
+    text: `${text}\n请告知用户结果；无需再次调用生图工具。`,
+    metadata: { plugin: pluginID, jobID, saved, attempts, ...(provider && { provider }), requested: job.params.n, ...(upstreamID && { upstreamID }) },
+  })
+}
 
 export default {
-  id: "opencode-codex-imagegen",
+  id: pluginID,
   async setup(ctx) {
-    const google = ctx.options?.provider === "google"
+    const options = ctx.options ?? {}
+    validateOptions(options)
+    const sessions = new Map()
+    const reserved = new Set()
+    const running = new Set()
+    const lifecycle = new AbortController()
     await ctx.tool.transform(editor => {
       editor.add({
-        name: "proxy_imagegen",
-        description: google
-          ? "Generate or edit an image through the Google Gemini API (Nano Banana by default). Omit images for text-to-image; pass local reference images to edit or combine them. Saves one PNG or JPEG without overwriting existing files."
-          : "Generate or edit an image with OpenAI's Responses hosted image_generation tool. Uses explicit options.base_url/options.key when configured; otherwise routes through the OpenAI account signed in to OpenCode (Sign in with ChatGPT, or the legacy Codex browser/device-code methods). Supports reference images; saves one PNG and never overwrites existing files. Size and quality are best-effort; the backend selects the actual image model.",
-        input: {
-          type: "object",
-          properties: {
-            prompt: { type: "string", description: "Describe the image; when using references explain each image's role in order." },
-            out: { type: "string", description: `${google ? "PNG or JPEG" : "PNG"} output path, relative to the current session directory or absolute.` },
-            images: { type: "array", items: { type: "string" }, ...(google ? { maxItems: GOOGLE_MAX_REFERENCES } : {}), description: `Local reference image paths (PNG, JPEG, ${google ? "" : "GIF, "}WebP).` },
-            ...(google ? {
-              aspect_ratio: { type: "string", enum: GOOGLE_ASPECT_RATIOS, description: "Optional width:height ratio; model support varies." },
-              image_size: { type: "string", enum: GOOGLE_IMAGE_SIZES, description: "Optional output resolution tier; model support varies." },
-            } : {
-              quality: { type: "string", enum: ["auto", "low", "medium", "high"] },
-              size: { type: "string", description: "auto or WIDTHxHEIGHT; exact dimensions depend on the backend." },
-            }),
-          },
-          required: ["prompt", "out"],
-          additionalProperties: false,
-        },
+        name: "auto_imagegen",
+        options: { codemode: false },
+        description: "Generate or edit images in the background. Try available providers in order: Codex (a chat model calling the hosted image_generation tool), OpenRouter, AIHubMix, Google Gemini. Choose parameters from the user's intent. Submit once; the originating session receives the actual provider, paths or failure. Do not poll or resubmit.",
+        input: schema,
         async execute(input, context) {
-          // Options are validated before anything network- or credential-related happens.
-          const config = pluginConfig(ctx.options)
-          validateInput(input, config.provider)
-          const session = await ctx.session.get({ sessionID: context.sessionID })
-          const directory = session.location.directory
-          // Respect normal OpenCode edit rules, including external-directory approval.
-          const source = { type: "tool", messageID: context.messageID, id: context.id }
-          if (input.images?.length) await ctx.permission.assert({
-            sessionID: context.sessionID,
-            agent: context.agent,
-            source,
-            action: "read",
-            resources: input.images.map(file => path.resolve(directory, file)),
+          const params = parameters(input)
+          const { sessionID } = context
+          const active = configuredProviders(options)
+          const codex = await codexCandidate(options.codex, ctx.integration?.connection, sessions.get(sessionID)?.has("codex"))
+          if (codex) active.unshift(codex)
+          if (!active.length) throw new Error("没有可用的生图服务：请启用至少一家服务，并登录 Codex 或配置 Codex、OpenRouter、AIHubMix 或 Google 任意一家的 key。")
+          const jobID = randomUUID()
+          const { location } = await ctx.session.get({ sessionID })
+          const sources = (input.images ?? []).map(file => path.resolve(location.directory, file))
+          const mask = input.mask && path.resolve(location.directory, input.mask)
+          const assert = (action, resources) => ctx.permission.assert({
+            sessionID, agent: context.agent, action, resources,
+            source: { type: "tool", messageID: context.messageID, id: context.id },
           })
-          const output = path.resolve(directory, input.out)
-          const extension = path.extname(output)
-          await ctx.permission.assert({
-            sessionID: context.sessionID,
-            agent: context.agent,
-            source,
-            action: "edit",
-            resources: [output, `${output.slice(0, -extension.length)}-v*${extension.toLowerCase()}`],
-          })
-          const result = await generateImage(input, config, directory, { ctx, signal: context.signal, sessionID: context.sessionID })
+          if (sources.length) await assert("read", mask ? [...sources, mask] : sources)
+          const first = path.resolve(location.directory, input.out ?? `images/imagegen-${jobID}.${params.output_format}`)
+          const { paths, release } = await reserveOutputs(first, params.n, reserved)
+          try {
+            await assert("edit", paths)
+            context.signal.throwIfAborted()
+            lifecycle.signal.throwIfAborted()
+          } catch (error) {
+            release()
+            throw error
+          }
+
+          // The tool call's signal ends with the foreground turn. Only plugin
+          // unload and the job's own deadline should stop an admitted job.
+          if (!sessions.has(sessionID)) sessions.set(sessionID, new Map())
+          const aspect = input.size && input.size !== "auto" ? undefined : input.aspect_ratio ?? "auto"
+          const task = run(ctx, { params, aspect, imageSize: input.image_size, sources, mask, paths, signal: lifecycle.signal }, sessionID, jobID, sessions.get(sessionID), active)
+            .catch(() => console.error(`[${pluginID}] Could not notify session ${sessionID} for job ${jobID}. Planned outputs: ${paths.join(", ")}`))
+            .finally(() => { release(); running.delete(task) })
+          running.add(task)
           return {
-            content: `Saved ${extension.toLowerCase() === ".png" ? "PNG" : "JPEG"}: ${result.out}${result.versioned ? " (versioned; existing file preserved)" : ""}`,
-            metadata: {
-              out: result.out,
-              versioned: result.versioned,
-              bytes: result.bytes,
-              route: result.route,
-              method: result.method,
-              model: result.model,
-            },
+            content: `后台生图任务已提交：${jobID}（请求 ${params.n} 张）。完成后会通知本会话，无需等待或轮询。`,
+            metadata: { jobID, status: "submitted", requested: params.n },
           }
         },
       })
     })
+    // Archive/delete clear this session only. A detached job retains its old
+    // map, so even a late 401 cannot recreate state for a removed session.
+    const events = (async () => {
+      for await (const event of ctx.event.subscribe({ types: ["session.archived", "session.deleted"], signal: lifecycle.signal })) {
+        sessions.delete(event.data.sessionID)
+      }
+    })().catch(() => { if (!lifecycle.signal.aborted) console.error(`[${pluginID}] Session lifecycle subscription ended.`) })
+    return async () => {
+      lifecycle.abort(new Error("插件已卸载，后台任务已取消。"))
+      sessions.clear()
+      await Promise.allSettled([...running, events])
+    }
   },
 }

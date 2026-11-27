@@ -3,6 +3,7 @@ import fs from "node:fs"
 import path from "node:path"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
+import plugin from "./index.js"
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 const read = file => fs.readFileSync(path.join(root, file), "utf8")
@@ -10,8 +11,8 @@ const pkg = JSON.parse(read("package.json"))
 const lock = JSON.parse(read("package-lock.json"))
 
 const PACKAGE_NAME = "@myoldtime/opencode-codex-imagegen"
-const PLUGIN_ID = "opencode-codex-imagegen"
-const TOOL_NAME = "proxy_imagegen"
+const PLUGIN_ID = "opencode-auto-imagegen"
+const TOOL_NAME = "auto_imagegen"
 const REPO = "https://github.com/MyOldTime/opencode-codex-imagegen"
 const NPM_REGISTRY = "https://registry.npmjs.org"
 const GITHUB_REGISTRY = "https://npm.pkg.github.com"
@@ -33,7 +34,7 @@ function step(name) {
 
 test("manifest publishes the scoped package name and lock stays in sync", () => {
   assert.equal(pkg.name, PACKAGE_NAME)
-  assert.equal(pkg.version, "0.2.0")
+  assert.equal(pkg.version, "1.0.0")
   assert.equal(pkg.license, "MIT")
   assert.equal(lock.name, PACKAGE_NAME)
   assert.equal(lock.packages[""].name, PACKAGE_NAME)
@@ -41,68 +42,35 @@ test("manifest publishes the scoped package name and lock stays in sync", () => 
   assert.equal(lock.packages[""].version, pkg.version)
 })
 
-test("repository, homepage and bugs all point at the renamed repository", () => {
+test("repository, homepage and bugs all point at the release repository", () => {
   assert.equal(pkg.repository.url, `git+${REPO}.git`)
   assert.equal(pkg.homepage, `${REPO}#readme`)
   assert.equal(pkg.bugs.url, `${REPO}/issues`)
   const readme = read("README.md")
   assert.ok(readme.includes(REPO), "README must link the repository")
-  assert.ok(!readme.includes("MyOldTime/codex-proxy-imagegen"), "README must not keep the old repository link")
 })
 
-test("plugin id uses the project name and the tool name stays stable", () => {
-  assert.match(read("index.js"), new RegExp(`id:\\s*"${PLUGIN_ID}"`))
-  assert.match(read("index.js"), new RegExp(`name:\\s*"${TOOL_NAME}"`))
-  assert.match(read("test.mjs"), new RegExp(`assert\\.equal\\(plugin\\.id, "${PLUGIN_ID}"\\)`))
-  assert.doesNotMatch(read("index.js"), /myoldtime\.codex-proxy-imagegen/)
+test("public entry point registers exactly one image tool", async () => {
+  assert.deepEqual(pkg.exports, { ".": "./index.js" })
+  assert.equal(plugin.id, PLUGIN_ID)
+  const tools = []
+  const unload = await plugin.setup({
+    tool: { transform: fn => fn({ add: def => tools.push(def.name) }) },
+    event: { async *subscribe() {} },
+  })
+  try { assert.deepEqual(tools, [TOOL_NAME]) } finally { await unload() }
 })
 
-test("README presents the current id and tool name without legacy names", () => {
+test("README documents the published package, actual tool and pinned plugin configuration", () => {
   const readme = read("README.md")
-  assert.ok(readme.includes(PLUGIN_ID), "README must document the current plugin id")
-  assert.ok(readme.includes(TOOL_NAME), "README must document the tool name")
-  assert.ok(!readme.includes("codex-proxy-imagegen"), "README must not mention legacy ids")
-  assert.ok(!readme.includes("从本地插件迁移"), "README must not keep the migration section")
-  assert.ok(!readme.includes("保持不变"), "README must not keep development-time naming notes")
-  // Installation must document all four supported sources with pinned versions.
-  const install = readme.slice(readme.indexOf("## 安装"), readme.indexOf("## 配置"))
-  const codeBlocks = (install.match(/```(?:sh|powershell)\n([\s\S]*?)```/g) ?? [])
-    .map(block => block.replace(/^```[a-z]*\n|```$/g, ""))
-  const pinnedNpm = `opencode plugin add "${PACKAGE_NAME}@0.2.0"`
-  const pinnedTag = 'opencode plugin add "github:MyOldTime/opencode-codex-imagegen#v0.2.0"'
-  assert.ok(codeBlocks.some(block => block.includes(pinnedNpm)), "npm install must pin the published version")
-  assert.ok(codeBlocks.some(block => block.includes(pinnedTag)), "tag install must use the repository tag")
-  assert.ok(
-    codeBlocks.filter(block => block.includes("opencode plugin list")).length >= 3,
-    "npm, tag and GitHub Packages installs must verify with plugin list"
-  )
-  assert.ok(install.includes("read:packages"), "GitHub Packages install must state the token permission")
-  assert.ok(install.includes("personal access token (classic)"), "GitHub Packages install must name the classic PAT")
-  assert.ok(install.includes("npm login --scope=@myoldtime"), "GitHub Packages install must log in to the scoped registry")
-  assert.ok(install.includes("/reload"), "install must mention the in-TUI reload")
-  assert.ok(install.includes("git clone https://github.com/MyOldTime/opencode-codex-imagegen.git"), "local install must clone the documented repository")
-  assert.ok(install.includes("npm ci --ignore-scripts"), "local install must install without running scripts")
-  assert.ok(/绝对路径/.test(install) && /不能指向单个文件/.test(install), "local install must require an absolute directory path")
-  assert.ok(install.includes(`${PACKAGE_NAME}@0.2.0`), "README config example must pin the released version")
-  assert.doesNotMatch(install, /autotitle/i, "install section must not copy another plugin's instructions")
-  assert.doesNotMatch(install, /迁移|保持不变/, "install section must not keep migration or naming notes")
-  // The read-only check block must not tell users to publish.
-  const section = readme.slice(readme.indexOf("只读检查"))
-  const fenceStart = section.indexOf("```powershell")
-  const fenceEnd = section.indexOf("```", fenceStart + 3)
-  const readOnly = section.slice(fenceStart, fenceEnd)
-  assert.ok(readOnly.includes("npm pack --dry-run"), "read-only block must keep the pack check")
-  assert.doesNotMatch(readOnly, /npm run publish|npm publish/, "read-only block must not contain a publish command")
-  assert.ok(section.indexOf("实际发布命令") > -1, "publish command needs its own labelled block")
-  // Every OpenCode config example must parse and carry the schema hint.
-  const jsonBlocks = readme.match(/```json\n([\s\S]*?)```/g) ?? []
-  const openCodeConfigs = jsonBlocks.filter(block => block.includes('"plugins"'))
-  assert.ok(openCodeConfigs.length >= 1, "README must keep at least one OpenCode config example")
-  for (const block of openCodeConfigs) {
-    const config = JSON.parse(block.replace(/^```json\n|```$/g, ""))
-    assert.equal(config.$schema, "https://opencode.ai/config.json", "each OpenCode config example needs $schema")
-    assert.ok(Array.isArray(config.plugins) && config.plugins.length > 0, "each OpenCode config example needs a plugins entry")
-  }
+  const spec = `${PACKAGE_NAME}@${pkg.version}`
+  assert.ok(readme.includes(PLUGIN_ID) && readme.includes(TOOL_NAME))
+  assert.ok(readme.includes(`opencode plugin add "${spec}"`))
+  const block = readme.match(/```jsonc\r?\n(\{[\s\S]*?)\r?\n```/)[1]
+  const config = JSON.parse(block.replace(/[ \t]+\/\/.*$/gm, ""))
+  assert.equal(config.$schema, "https://opencode.ai/config.json")
+  assert.equal(config.plugins[0].package, spec)
+  assert.deepEqual(Object.keys(config.plugins[0].options), ["codex", "openrouter", "aihubmix", "google"])
 })
 
 test("no registry is pinned by config, so each publish target stays explicit", () => {
@@ -126,7 +94,7 @@ test("test and check scripts cover the release test, files stay free of tests", 
   for (const file of pkg.files) {
     assert.doesNotMatch(file, /test|\.npmrc|\.github|auth|token|secret/i, `files entry ${file} must not ship tests, config or credentials`)
   }
-  for (const required of ["index.js", "core.mjs", "README.md", "LICENSE", "CHANGELOG.md", "VALIDATION.md"]) {
+  for (const required of ["index.js", "parameters.js", "images.js", "routing.js", "codex.js", "google.js", "errors.js", "README.md", "LICENSE"]) {
     assert.ok(pkg.files.includes(required), `files must ship ${required}`)
   }
 })
